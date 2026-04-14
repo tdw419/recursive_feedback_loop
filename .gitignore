@@ -11,3 +11,4 @@ run*/
 *.egg
 .pytest_cache/
 .mypy_cache/
+seed_canvas.txt
