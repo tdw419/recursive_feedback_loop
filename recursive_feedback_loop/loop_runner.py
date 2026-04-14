@@ -240,7 +240,8 @@ class LoopRunner:
                 nudge = (
                     f"{instruction}\n\n"
                     f"This is iteration {i + 1} of {self.config.max_iterations}. "
-                    f"Continue from where you left off."
+                    f"Continue from where you left off. Do NOT repeat what you already said — "
+                    f"go deeper, find new angles, and be specific."
                 )
 
                 self.state.log("nudge_sent", {"iteration": i, "chars": len(nudge)})

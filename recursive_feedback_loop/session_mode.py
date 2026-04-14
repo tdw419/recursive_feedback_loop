@@ -87,24 +87,27 @@ class HermesSession:
         # Capture current state to know where the new response starts
         pre_capture = self._capture_pane()
 
-        # Send the prompt
-        # Use a unique marker so we can find where our response begins
+        # Send the prompt via tmux. For long prompts, use file-based approach
+        # since tmux send-keys truncates large input.
         self._response_count += 1
-        marker = f"[RFL-ITER-{self._response_count}]"
 
-        # Send the prompt via tmux
-        escaped = prompt.replace("'", "'\\''")
-        subprocess.run(
-            f"tmux send-keys -t {self.session_name} '{escaped}' Enter",
-            shell=True, capture_output=True, text=True, timeout=10,
-        )
+        if len(prompt) > 3000:
+            self._send_long_prompt(prompt)
+        else:
+            escaped = prompt.replace("'", "'\\''")
+            subprocess.run(
+                f"tmux send-keys -t {self.session_name} '{escaped}' Enter",
+                shell=True, capture_output=True, text=True, timeout=10,
+            )
 
         # Wait for response to complete (❯ prompt returns)
         deadline = time.time() + timeout
         last_change_time = time.time()
+        poll_count = 0
 
         while time.time() < deadline:
-            time.sleep(3)
+            time.sleep(5)  # poll every 5s (less aggressive)
+            poll_count += 1
             current = self._capture_pane()
 
             # Check if the prompt indicator is back and Hermes is truly idle.
@@ -125,8 +128,8 @@ class HermesSession:
             if current != self._last_capture:
                 last_change_time = time.time()
                 self._last_capture = current
-            elif time.time() - last_change_time > 120:
-                # No change for 2 minutes — probably stuck or finished silently
+            elif time.time() - last_change_time > 300:
+                # No change for 5 minutes — probably stuck or finished silently
                 response = self._extract_response(pre_capture, current)
                 self._last_capture = current
                 return response
@@ -145,16 +148,62 @@ class HermesSession:
             return ""
 
     def _extract_response(self, pre_capture: str, post_capture: str) -> str:
-        """Extract the new response text between two captures.
+        """Extract the new response text from the tmux pane.
 
-        Strategy: find the content that's new in post_capture vs pre_capture,
-        then strip out the Hermes UI elements (boxes, tool calls, etc).
+        Strategy: find the LAST Hermes response box and extract its content.
+        Falls back to diff-based extraction if no box found.
         """
-        # Get lines that are new or changed
-        pre_lines = pre_capture.split("\n")
         post_lines = post_capture.split("\n")
 
-        # Find the first line that differs — that's where our response starts
+        # Strategy 1: Find the LAST Hermes response box
+        # Look for closing ╰─ first, then scan back for matching ╭─ ⚕ Hermes
+        box_end = None
+        for i in range(len(post_lines) - 1, -1, -1):
+            if post_lines[i].strip().startswith("╰─"):
+                box_end = i
+                break
+
+        if box_end is not None:
+            # Scan back for the matching opening
+            box_start = None
+            for i in range(box_end, -1, -1):
+                if "╭─" in post_lines[i] and ("Hermes" in post_lines[i] or "⚕" in post_lines[i]):
+                    box_start = i
+                    break
+
+            if box_start is not None:
+                # Extract content between box_start and box_end
+                box_lines = post_lines[box_start + 1:box_end]
+                return self._clean_response(box_lines)
+
+        # Strategy 2: Look for the LAST response (latest text after last prompt)
+        # Find lines that look like content (not UI)
+        # Walk backwards from the end, skip UI elements, collect content
+        content_lines = []
+        for line in reversed(post_lines):
+            stripped = line.strip()
+            # Stop at known boundaries
+            if stripped.startswith("● "):
+                break
+            if stripped.startswith("╭─") and "Hermes" in stripped:
+                break
+            # Skip UI lines (going backwards)
+            if stripped.startswith("───") or stripped == "❯":
+                continue
+            if "type a message" in stripped:
+                continue
+            if "Initializing agent" in stripped:
+                continue
+            if not stripped and not content_lines:
+                continue
+            content_lines.append(line)
+
+        content_lines.reverse()
+        if content_lines:
+            return self._clean_response(content_lines)
+
+        # Strategy 3: Fall back to diff
+        pre_lines = pre_capture.split("\n")
         start_idx = 0
         min_len = min(len(pre_lines), len(post_lines))
         for i in range(min_len):
@@ -162,13 +211,45 @@ class HermesSession:
                 start_idx = i
                 break
         else:
-            # All shared lines match — new content is appended
             start_idx = min_len
 
         new_lines = post_lines[start_idx:]
-
-        # Clean the response
         return self._clean_response(new_lines)
+
+    def _send_long_prompt(self, prompt: str):
+        """Send a long prompt to tmux using file-based buffer approach.
+
+        tmux send-keys truncates input at ~4000 chars. For longer prompts,
+        we write to a temp file, load it into tmux's paste buffer, and paste.
+        """
+        import tempfile
+        import os
+
+        # Write prompt to temp file
+        fd, path = tempfile.mkstemp(prefix="rfl_prompt_", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(prompt)
+
+            # Load into tmux paste buffer and paste
+            subprocess.run(
+                f"tmux load-buffer -t {self.session_name} {path}",
+                shell=True, capture_output=True, text=True, timeout=10,
+            )
+            # Small delay to ensure buffer is loaded
+            time.sleep(0.3)
+            # Paste the buffer and press Enter
+            subprocess.run(
+                f"tmux paste-buffer -t {self.session_name}",
+                shell=True, capture_output=True, text=True, timeout=10,
+            )
+            time.sleep(0.3)
+            subprocess.run(
+                f"tmux send-keys -t {self.session_name} Enter",
+                shell=True, capture_output=True, text=True, timeout=10,
+            )
+        finally:
+            os.unlink(path)
 
     @staticmethod
     def _clean_response(lines: list) -> str:
