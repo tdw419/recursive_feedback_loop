@@ -12,3 +12,5 @@ run*/
 .pytest_cache/
 .mypy_cache/
 seed_canvas.txt
+rfl_autoresearch/run/
+rfl_autoresearch/results.tsv
