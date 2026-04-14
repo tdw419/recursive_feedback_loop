@@ -17,6 +17,7 @@ class LoopConfig:
     max_iterations: int = 10
     max_runtime_seconds: int = 3600  # 1 hour default
     iteration_timeout: int = 600  # 10 min per iteration (Hermes uses tools)
+    seed_timeout: Optional[int] = None  # seed iteration timeout (default: 2x iteration_timeout)
 
     # --- Mode ---
     mode: str = "oneshot"  # "oneshot" (fresh Hermes per iteration) or "session" (persistent tmux)

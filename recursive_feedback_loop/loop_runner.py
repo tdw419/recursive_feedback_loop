@@ -216,7 +216,7 @@ class LoopRunner:
             self.state.log("seed_prompt", {"content_preview": seed[:200]})
             self.state.conversation.add("user", seed, iteration=0)
 
-            response = session.send_prompt(seed, timeout=self.config.iteration_timeout)
+            response = session.send_prompt(seed, timeout=self._seed_timeout())
             if response:
                 self.state.conversation.add("assistant", response, iteration=0)
                 self.state.log("seed_response", {"content_preview": response[:200], "tokens": len(response) // 4})
@@ -370,7 +370,7 @@ class LoopRunner:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.config.iteration_timeout,
+                timeout=self._seed_timeout() if iteration == 0 else self.config.iteration_timeout,
                 cwd=self.config.hermes_workdir,
             )
             if result.returncode == 0:
@@ -435,6 +435,12 @@ class LoopRunner:
         result = _deduplicate_response(result)
 
         return result if result else raw
+
+    def _seed_timeout(self) -> int:
+        """Get the seed iteration timeout (longer than normal iterations)."""
+        if self.config.seed_timeout:
+            return self.config.seed_timeout
+        return self.config.iteration_timeout * 2
 
     def _build_synthesis_prompt(self, compacted_context: str) -> str:
         """Build the prompt that feeds compacted history back to the AI."""
