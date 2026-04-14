@@ -33,7 +33,9 @@ def test_delta_ratio_identical():
     """Identical turns should have low delta."""
     turns = ["The quick brown fox jumps over the lazy dog"] * 3
     ratio = score_delta_ratio(turns)
-    assert ratio < 0.3  # mostly repetition
+    # With stopword filtering, the content words are quick/brown/fox/jumps/lazy/dog
+    # Since they're identical, delta should be very low
+    assert ratio < 0.3
 
 
 def test_delta_ratio_different():
@@ -44,7 +46,7 @@ def test_delta_ratio_different():
         "lambda mu nu xi omicron",
     ]
     ratio = score_delta_ratio(turns)
-    assert ratio > 0.8  # mostly new
+    assert ratio > 0.9  # no shared content words
 
 
 def test_delta_ratio_single():

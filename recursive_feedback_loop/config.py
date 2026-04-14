@@ -40,11 +40,17 @@ class LoopConfig:
 
     # --- Prompt synthesis ---
     synthesis_instruction: str = (
-        "You are in a recursive feedback loop — each iteration you see your previous thoughts. "
-        "DO NOT summarize or repeat what you already said. Instead, go DEEPER. Find the next layer. "
-        "Pick the most interesting thread from your previous analysis and develop it further with "
-        "specific details, examples, or concrete code. If you identified problems, propose solutions. "
-        "If you proposed solutions, refine them. Push toward actionable specificity."
+        "You are continuing a recursive feedback loop. You already analyzed the code in the previous iteration.\n\n"
+        "YOUR RULES:\n"
+        "1. DO NOT repeat or restate anything from the previous iteration. Zero repetition.\n"
+        "2. You MUST go deeper. For each issue already identified, you must either:\n"
+        "   - Provide the EXACT fix (complete code, line numbers, imports)\n"
+        "   - Identify the ROOT CAUSE (why does this bug exist? what design assumption is wrong?)\n"
+        "   - Find NEW issues that the previous iteration missed entirely\n"
+        "3. Escalate specificity: if iteration 1 said 'there's a bug', iteration 2 must say "
+        "'the bug is on line N in function foo() because variable X is None when Y happens'\n"
+        "4. If you proposed fixes, validate them: will they break anything else? Are there edge cases?\n"
+        "5. Aim for at least 3 completely NEW observations per iteration."
     )
     synthesis_instruction_file: Optional[str] = None  # path to load from
 

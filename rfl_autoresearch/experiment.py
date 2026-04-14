@@ -118,27 +118,45 @@ def _count_specificity_markers(text: str) -> int:
     return markers
 
 
+STOPWORDS = frozenset(
+    "the a an is are was were be been being have has had do does did will would "
+    "could should may might shall can to of in for on with at by from as into "
+    "through during before after above below between out off over under again "
+    "further then once here there when where why how all both each few more most "
+    "other some such no nor not only own same so than too very just because "
+    "but and or if while about against between through during this that these "
+    "those it its he she they them we you i me my your his her our their what "
+    "which who whom".split()
+)
+
+
 def score_delta_ratio(turns_text: List[str]) -> float:
     """Measure how much new content each iteration adds vs repeating.
 
+    Uses meaningful words (excluding stopwords) for comparison.
     For each pair of consecutive turns, compute the fraction of
-    bigrams in the new turn that don't appear in the previous one.
-    Average across all pairs.
+    content words in the new turn that don't appear in the previous one.
     """
     if len(turns_text) < 2:
         return 1.0  # only one turn, all new by definition
 
     ratios = []
     for i in range(1, len(turns_text)):
-        prev_words = set(turns_text[i-1].lower().split())
-        curr_words = turns_text[i].lower().split()
+        prev_content = set(
+            w for w in turns_text[i-1].lower().split()
+            if w not in STOPWORDS and len(w) > 2
+        )
+        curr_words = [
+            w for w in turns_text[i].lower().split()
+            if w not in STOPWORDS and len(w) > 2
+        ]
 
         if not curr_words:
-            ratios.append(0.0)
+            ratios.append(0.5)  # neutral if no content words
             continue
 
-        # Count words in current that don't appear in previous
-        new_words = sum(1 for w in curr_words if w not in prev_words)
+        # Count content words in current that don't appear in previous
+        new_words = sum(1 for w in curr_words if w not in prev_content)
         ratio = new_words / len(curr_words)
         ratios.append(ratio)
 
@@ -412,6 +430,10 @@ def main():
                         help="Results TSV file (default: ./rfl_autoresearch/results.tsv)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Use mock output (no Hermes calls) for testing the scoring pipeline")
+    parser.add_argument("--synthesis-file", default=None,
+                        help="Custom synthesis instruction file (overrides default)")
+    parser.add_argument("--synthesis", default=None,
+                        help="Custom synthesis instruction (overrides default)")
     args = parser.parse_args()
 
     # Load seed prompt
@@ -430,7 +452,8 @@ def main():
     # Results log
     results_file = Path(args.log) if args.log else Path(__file__).parent / "results.tsv"
 
-    config = LoopConfig(
+    # Build config kwargs — only override synthesis if explicitly provided
+    config_kwargs = dict(
         seed_prompt=seed,
         max_iterations=args.iterations,
         max_context_tokens=args.budget,
@@ -445,6 +468,12 @@ def main():
         output_dir=output_dir,
         export_format="both",
     )
+    if args.synthesis:
+        config_kwargs["synthesis_instruction"] = args.synthesis
+    elif args.synthesis_file:
+        config_kwargs["synthesis_instruction_file"] = args.synthesis_file
+
+    config = LoopConfig(**config_kwargs)
 
     print(f"Running experiment: {args.description}")
     print(f"  Strategy: {config.compaction_strategy}")
