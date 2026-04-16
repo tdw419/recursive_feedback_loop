@@ -398,6 +398,26 @@ def cmd_templates(args) -> int:
     return 0
 
 
+def _normalize_issue_path(file_path: str, project_path: Path) -> str:
+    """Normalize issue file paths relative to project root.
+    
+    The LLM may output paths like 'recursive_feedback_loop/config.py' or
+    './config.py' or 'config.py' for the same file. This normalizes them.
+    """
+    if not file_path:
+        return file_path
+    p = file_path
+    # Strip ./ prefix
+    if p.startswith("./"):
+        p = p[2:]
+    # Try to make relative to project name
+    proj_name = project_path.name
+    # If path starts with project_name/, strip it
+    if p.startswith(proj_name + "/"):
+        p = p[len(proj_name) + 1:]
+    return p
+
+
 def cmd_self_audit(args) -> int:
     """Run self-audit on a codebase using the RFL loop."""
     project_path = Path(args.path).resolve()
@@ -488,6 +508,9 @@ def cmd_self_audit(args) -> int:
     for turn in state.conversation.turns:
         if turn.role == "assistant":
             iter_issues = parse_issues(turn.content, iteration=turn.iteration)
+            # Normalize file paths relative to project root
+            for issue in iter_issues:
+                issue.file = _normalize_issue_path(issue.file, project_path)
             issue_history.append(iter_issues)
             all_issues.extend(iter_issues)
 

@@ -49,6 +49,9 @@ class Issue:
         """Fuzzy identity for dedup. Normalizes file + first 60 chars of description."""
         desc = self.description.lower().strip()[:60]
         file_norm = self.file.replace("\\", "/")
+        # Normalize: strip leading ./ prefix for dedup
+        if file_norm.startswith("./"):
+            file_norm = file_norm[2:]
         return f"{file_norm}:{desc}"
 
 
