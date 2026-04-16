@@ -19,6 +19,9 @@ from pathlib import Path
 from .config import LoopConfig, find_running_rfl_instances
 from .loop_runner import LoopRunner
 from .templates import load_template, list_templates, apply_template
+from .seed_builder import build_audit_seed, detect_mode
+from .issue_parser import parse_issues, check_convergence, deduplicate_issues, filter_by_severity
+from .report import generate_report, write_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +80,35 @@ def build_parser() -> argparse.ArgumentParser:
     # --- templates ---
     tmpl = sub.add_parser("templates", help="List or show RFL templates")
     tmpl.add_argument("name", nargs="?", help="Template name to show details for")
+
+    # --- self-audit ---
+    sa = sub.add_parser("self-audit", help="Run a self-audit on a codebase using the RFL loop")
+    sa.add_argument("path", help="Path to the project to audit")
+    sa.add_argument("--diff", action="store_true", default=False,
+                     help="Only audit uncommitted changes (default if git detected)")
+    sa.add_argument("--full", action="store_true", default=False,
+                     help="Audit the entire codebase")
+    sa.add_argument("--iterations", "-n", type=int, default=4,
+                     help="Max iterations (default: 4)")
+    sa.add_argument("--budget", "-b", type=int, default=12000,
+                     help="Max context tokens per iteration (default: 12000)")
+    sa.add_argument("--severity-threshold", "-S",
+                     choices=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+                     default="MEDIUM",
+                     help="Only report issues at or above this severity (default: MEDIUM)")
+    sa.add_argument("--output-report", "-o", default="",
+                     help="Output path for the report file (default: ./self_audit_report.md)")
+    sa.add_argument("--json", action="store_true", default=False,
+                     help="Output JSON instead of markdown")
+    sa.add_argument("--model", "-m", help="Hermes model to use")
+    sa.add_argument("--provider", help="Hermes provider")
+    sa.add_argument("--strategy", "-s",
+                     choices=["sliding_window", "rolling_summary", "hierarchical"],
+                     default="hierarchical", help="Compaction strategy")
+    sa.add_argument("--timeout", "-t", type=int, default=900,
+                     help="Per-iteration timeout in seconds (default: 900)")
+    sa.add_argument("--workdir", "-w", default="",
+                     help="Working directory for Hermes (default: same as PATH)")
 
     return parser
 
@@ -366,6 +398,150 @@ def cmd_templates(args) -> int:
     return 0
 
 
+def cmd_self_audit(args) -> int:
+    """Run self-audit on a codebase using the RFL loop."""
+    project_path = Path(args.path).resolve()
+    if not project_path.is_dir():
+        print(f"Error: {project_path} is not a directory", file=sys.stderr)
+        return 1
+
+    # Determine audit mode
+    if args.full:
+        mode = "full"
+    elif args.diff:
+        mode = "diff"
+    else:
+        mode = detect_mode(project_path)
+        print(f"  Auto-detected mode: {mode}")
+
+    # Build the seed prompt
+    print(f"  Building {mode} seed for {project_path.name}...")
+    try:
+        seed_prompt = build_audit_seed(project_path, mode=mode)
+    except Exception as e:
+        print(f"Error building seed: {e}", file=sys.stderr)
+        return 1
+
+    print(f"  Seed prompt: {len(seed_prompt)} chars")
+
+    # Set up workdir
+    workdir = args.workdir or str(project_path)
+
+    # Build config for the RFL loop
+    config = LoopConfig(
+        seed_prompt=seed_prompt,
+        mode="oneshot",
+        max_iterations=args.iterations,
+        max_context_tokens=args.budget,
+        compaction_strategy=args.strategy,
+        hermes_model=args.model,
+        hermes_provider=args.provider,
+        hermes_workdir=workdir,
+        hermes_no_tools=False,  # self-audit needs tools to read files
+        iteration_timeout=args.timeout,
+        output_dir="",
+        save_snapshots=True,
+        export_format="both",
+    )
+
+    # Custom synthesis instruction for audit mode
+    config.synthesis_instruction = (
+        "You are continuing a code audit. You already analyzed the code in the previous iteration.\n\n"
+        "YOUR RULES:\n"
+        "1. DO NOT repeat or restate anything from the previous iteration. Zero repetition.\n"
+        "2. You MUST go deeper. For each issue already identified, either:\n"
+        "   - Provide the EXACT fix (complete code, line numbers, imports)\n"
+        "   - Identify the ROOT CAUSE (why does this bug exist?)\n"
+        "   - Find NEW issues the previous iteration missed\n"
+        "3. Verify previous claims against the ACTUAL source code. Correct wrong line numbers.\n"
+        "4. Each issue: [SEVERITY] file:line -- description\n"
+        "5. Aim for at least 3 completely NEW observations per iteration."
+    )
+
+    runner = LoopRunner(config)
+
+    # Handle Ctrl+C
+    def handle_signal(sig, frame):
+        print("\nStopping self-audit...", file=sys.stderr)
+        runner.stop()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    print(f"\nSelf-Audit Starting")
+    print(f"  Project:  {project_path.name}")
+    print(f"  Mode:     {mode}")
+    print(f"  Max iterations: {args.iterations}")
+    print(f"  Budget:   {args.budget} tokens/iter")
+    print(f"  Strategy: {args.strategy}")
+    print()
+
+    # Run the loop
+    state = runner.run()
+
+    print(f"\nLoop complete: {state.iteration + 1} iterations, {state.elapsed():.1f}s")
+    print(f"  Output dir: {state.output_dir}")
+
+    # Parse issues from each iteration's output
+    issue_history = []
+    all_issues = []
+    for turn in state.conversation.turns:
+        if turn.role == "assistant":
+            iter_issues = parse_issues(turn.content, iteration=turn.iteration)
+            issue_history.append(iter_issues)
+            all_issues.extend(iter_issues)
+
+    if not all_issues:
+        print("\nNo issues parsed from LLM output.")
+        print("The loop ran but no structured issues were found.")
+        print(f"Check the full output at: {state.output_dir}/conversation.md")
+        return 0
+
+    # Check convergence
+    convergence = check_convergence(issue_history, args.severity_threshold)
+
+    # Deduplicate all issues
+    deduped = deduplicate_issues(all_issues)
+
+    # Filter by severity threshold
+    filtered = filter_by_severity(deduped, args.severity_threshold)
+
+    # Generate report
+    output_format = "json" if args.json else "markdown"
+    report_path_str = args.output_report
+    if not report_path_str:
+        ext = "json" if args.json else "md"
+        report_path_str = str(Path(project_path) / f"self_audit_report.{ext}")
+
+    report_path = write_report(
+        issues=filtered,
+        issue_history=issue_history,
+        convergence=convergence,
+        project_path=str(project_path),
+        output_path=report_path_str,
+        output_format=output_format,
+        severity_threshold=args.severity_threshold,
+    )
+
+    # Print summary
+    print(f"\n{'=' * 60}")
+    print(f"SELF-AUDIT RESULTS")
+    print(f"{'=' * 60}")
+    by_sev = {}
+    for i in filtered:
+        by_sev[i.severity] = by_sev.get(i.severity, 0) + 1
+    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+        if sev in by_sev:
+            print(f"  {sev:10s} {by_sev[sev]}")
+    print(f"  {'TOTAL':10s} {len(filtered)}")
+    print(f"  Converged: {'Yes' if convergence.converged else 'No'}")
+    print(f"\n  Report saved to: {report_path}")
+    print(f"  Full output: {state.output_dir}/conversation.md")
+    print()
+
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -380,6 +556,8 @@ def main() -> int:
         return cmd_list(args)
     elif args.command == "templates":
         return cmd_templates(args)
+    elif args.command == "self-audit":
+        return cmd_self_audit(args)
     else:
         parser.print_help()
         return 0
