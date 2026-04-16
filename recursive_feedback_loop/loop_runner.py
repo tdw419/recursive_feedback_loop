@@ -7,17 +7,23 @@ Flow:
   4. Build synthesis prompt from compacted context
   5. Feed synthesis prompt back into Hermes
   6. Repeat until max iterations or timeout
+
+Concurrency: each run gets its own output dir and PID lockfile.
+Multiple instances can run simultaneously as long as they target
+different workdirs (checked on start).
 """
 
 import json
+import os
 import time
 import subprocess
 import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
-from .config import LoopConfig
+from .config import LoopConfig, find_running_rfl_instances, check_workdir_conflicts
 from .session_reader import SessionReader, Turn, Conversation, extract_assistant_response
 from .compaction import get_strategy, CompactionStrategy
 from .session_mode import HermesSession
@@ -28,7 +34,7 @@ def _deduplicate_response(text: str) -> str:
     Detect and remove the duplicate if the first half equals the second half.
     """
     mid = len(text) // 2
-    if mid < 200:
+    if mid < 50:
         return text
 
     # Strategy 1: Check if second half starts with same content as first
@@ -155,6 +161,31 @@ class LoopRunner:
         output_dir = self.config.get_output_dir()
         self.state = LoopState(output_dir)
 
+        # --- Acquire PID lockfile ---
+        if not self._acquire_lock():
+            self._running = False
+            return self.state
+
+        # --- Check workdir conflicts ---
+        if self.config.hermes_workdir:
+            conflicts = check_workdir_conflicts(self.config.hermes_workdir)
+            if conflicts:
+                print("WARNING: Another RFL instance is using the same workdir!", file=sys.stderr)
+                for c in conflicts:
+                    print(
+                        f"  PID {c['pid']}: {c.get('workdir', '?')} "
+                        f"(started {c.get('started_at', '?')}, output: {c.get('output_dir', '?')})",
+                        file=sys.stderr,
+                    )
+                print(
+                    "Both instances will modify the same files. "
+                    "Use different --workdir or --output dirs to run in parallel.",
+                    file=sys.stderr,
+                )
+                self.state.log("workdir_conflict", {
+                    "conflicting_pids": [c["pid"] for c in conflicts],
+                })
+
         # Initialize compactor
         compactor_kwargs = {}
         if self.config.compaction_strategy in ("rolling_summary", "hierarchical"):
@@ -177,14 +208,20 @@ class LoopRunner:
                 "compaction": self.config.compaction_strategy,
                 "token_budget": self.config.max_context_tokens,
                 "mode": self.config.mode,
+                "run_id": self.config.get_run_id(),
+                "output_dir": str(output_dir),
             }
         })
 
-        # Choose execution path based on mode
-        if self.config.mode == "session":
-            return self._run_session_mode()
-        else:
-            return self._run_oneshot_mode()
+        try:
+            # Choose execution path based on mode
+            if self.config.mode == "session":
+                result = self._run_session_mode()
+            else:
+                result = self._run_oneshot_mode()
+            return result
+        finally:
+            self._release_lock()
 
     def _run_session_mode(self) -> LoopState:
         """Run the loop with a persistent Hermes tmux session.
@@ -194,14 +231,14 @@ class LoopRunner:
         No need to feed compacted context back — Hermes already has it.
         """
         session = HermesSession(
-            session_name=self.config.tmux_session_name,
+            session_name=self.config.get_tmux_session_name(),
             model=self.config.hermes_model,
             provider=self.config.hermes_provider,
             profile=self.config.hermes_profile,
             workdir=self.config.hermes_workdir,
         )
 
-        self.state.log("session_starting", {"session": self.config.tmux_session_name})
+        self.state.log("session_starting", {"session": self.config.get_tmux_session_name()})
 
         if not session.start():
             self.state.log("session_start_failed")
@@ -434,7 +471,7 @@ class LoopRunner:
         # (once inside the box, once as final text)
         result = _deduplicate_response(result)
 
-        return result if result else raw
+        return result
 
     def _seed_timeout(self) -> int:
         """Get the seed iteration timeout (longer than normal iterations)."""
@@ -447,8 +484,60 @@ class LoopRunner:
         instruction = self.config.resolve_synthesis_instruction()
         return (
             f"{instruction}\n\n"
-            f"--- CONVERSATION HISTORY ---\n"
+            f"--- HISTORY ---\n"
             f"{compacted_context}\n"
-            f"--- END HISTORY ---\n\n"
-            f"Continue from here. Iteration {self.state.iteration + 1} of {self.config.max_iterations}."
+            f"--- END ---\n"
+            f"Iteration {self.state.iteration + 1}/{self.config.max_iterations}. Continue deeper."
         )
+
+    def _acquire_lock(self) -> bool:
+        """Acquire a PID lockfile. Returns False if this output dir is already locked by a live process."""
+        lockpath = self.config.get_lockfile_path()
+        
+        # Check for existing lock
+        if lockpath.exists():
+            try:
+                data = json.loads(lockpath.read_text())
+                existing_pid = data.get("pid", 0)
+                if existing_pid and _pid_alive(existing_pid):
+                    print(
+                        f"ERROR: Output dir {self.config.get_output_dir()} is locked by "
+                        f"PID {existing_pid} (run {data.get('run_id', '?')})",
+                        file=sys.stderr,
+                    )
+                    return False
+                else:
+                    # Stale lockfile -- clean it up
+                    lockpath.unlink(missing_ok=True)
+            except (json.JSONDecodeError, OSError):
+                # Corrupt lockfile -- remove it
+                lockpath.unlink(missing_ok=True)
+        
+        # Write our lock
+        try:
+            lockpath.write_text(json.dumps(self.config.get_lockfile_data(), indent=2))
+            return True
+        except OSError as e:
+            print(f"WARNING: Could not write lockfile: {e}", file=sys.stderr)
+            return True  # Non-fatal -- proceed without lock
+
+    def _release_lock(self):
+        """Release the PID lockfile."""
+        lockpath = self.config.get_lockfile_path()
+        try:
+            if lockpath.exists():
+                # Only remove our own lock (not someone else's)
+                data = json.loads(lockpath.read_text())
+                if data.get("pid") == os.getpid():
+                    lockpath.unlink()
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check if a PID is still alive (portable)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False

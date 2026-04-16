@@ -84,7 +84,9 @@ class SessionReader:
             return new_turns
 
         with open(self.session_path, "r") as f:
+            last_i = 0
             for i, line in enumerate(f):
+                last_i = i
                 if i < self._last_line:
                     continue
                 line = line.strip()
@@ -100,7 +102,7 @@ class SessionReader:
                         new_turns.append(Turn(role=role, content=content, timestamp=ts))
                 except json.JSONDecodeError:
                     continue
-            self._last_line = i + 1
+            self._last_line = last_i + 1
 
         return new_turns
 

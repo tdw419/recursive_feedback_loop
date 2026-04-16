@@ -68,20 +68,31 @@ class RollingSummary(CompactionStrategy):
         self.compaction_model = compaction_model
         self.compaction_provider = compaction_provider
         self._running_summary = ""
+        self._last_summarized_idx = -1  # track what's been summarized
 
     def name(self) -> str:
         return "rolling_summary"
 
     def compact(self, conversation: Conversation, token_budget: int) -> str:
         recent = conversation.last_n_turns(self.recent_turns)
-        older = conversation.turns[:-self.recent_turns] if len(conversation.turns) > self.recent_turns else []
+        # Only summarize turns not yet incorporated into the summary
+        older = conversation.turns[:max(0, len(conversation.turns) - self.recent_turns)]
+        new_older = older[self._last_summarized_idx + 1:]
 
-        if older:
-            # Update the running summary with new older turns
-            older_text = _format_turns(older, token_budget * 2)  # temp larger budget
-            new_summary = self._summarize(older_text)
+        if new_older:
+            new_text = _format_turns(new_older, token_budget * 2)
+            new_summary = self._summarize(new_text)
             if new_summary:
-                self._running_summary = new_summary
+                if self._running_summary:
+                    self._running_summary = (
+                        self._running_summary + " " + new_summary
+                    )
+                    if len(self._running_summary) > self.summary_max_chars:
+                        # Re-compress when exceeding budget
+                        self._running_summary = self._summarize(self._running_summary) or self._running_summary[:self.summary_max_chars]
+                else:
+                    self._running_summary = new_summary
+            self._last_summarized_idx = len(older) - 1
 
         parts = []
         if self._running_summary:
@@ -169,6 +180,7 @@ class Hierarchical(CompactionStrategy):
         self.compaction_model = compaction_model
         self.compaction_provider = compaction_provider
         self._accumulated_summary = ""
+        self._last_old_idx = -1  # track what's been summarized
 
     def name(self) -> str:
         return "hierarchical"
@@ -180,20 +192,23 @@ class Hierarchical(CompactionStrategy):
         medium = conversation.turns[medium_start : n - self.recent_turns] if n > self.recent_turns else []
         old = conversation.turns[:medium_start] if medium_start > 0 else []
 
-        # Update accumulated summary with old turns
+        # Update accumulated summary with old turns (only new ones)
         if old:
-            old_text = _format_turns(old, token_budget * 2)
-            new_summary = self._summarize(old_text)
-            if new_summary:
-                if self._accumulated_summary:
-                    self._accumulated_summary = self._summarize(
-                        f"Previous summary: {self._accumulated_summary}\n\nNew content to integrate: {new_summary}"
-                    ) or (self._accumulated_summary + " " + new_summary)
-                else:
-                    self._accumulated_summary = new_summary
-                # Keep summary bounded
-                if len(self._accumulated_summary) > self.summary_max_chars:
-                    self._accumulated_summary = self._accumulated_summary[: self.summary_max_chars - 3] + "..."
+            new_old = old[self._last_old_idx + 1:]
+            if new_old:
+                old_text = _format_turns(new_old, token_budget * 2)
+                new_summary = self._summarize(old_text)
+                if new_summary:
+                    if self._accumulated_summary:
+                        self._accumulated_summary = self._summarize(
+                            f"Previous summary: {self._accumulated_summary}\n\nNew content to integrate: {new_summary}"
+                        ) or (self._accumulated_summary + " " + new_summary)
+                    else:
+                        self._accumulated_summary = new_summary
+                    # Keep summary bounded
+                    if len(self._accumulated_summary) > self.summary_max_chars:
+                        self._accumulated_summary = self._accumulated_summary[: self.summary_max_chars - 3] + "..."
+                self._last_old_idx = len(old) - 1
 
         parts = []
 
@@ -269,9 +284,12 @@ def _format_turns(turns: List[Turn], token_budget: int) -> str:
 def _turn_to_bullets(turn: Turn) -> str:
     """Extract key points from a turn as a condensed bullet string."""
     content = turn.content
-    # Split into sentences, take first few
+    # Split into sentences using regex to avoid mangling != and file extensions
+    import re
     sentences = []
-    for s in content.replace("!", ".").replace("?", ".").split("."):
+    # Split on sentence boundaries: period/question/excl followed by space and uppercase
+    parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', content)
+    for s in parts:
         s = s.strip()
         if s and len(s) > 15:
             sentences.append(s)
