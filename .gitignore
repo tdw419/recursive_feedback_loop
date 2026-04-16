@@ -14,3 +14,6 @@ run*/
 seed_canvas.txt
 rfl_autoresearch/run/
 rfl_autoresearch/results.tsv
+rfl_output_*/
+rfl_*/
+self_audit_seed.txt
