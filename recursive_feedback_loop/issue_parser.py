@@ -76,13 +76,13 @@ class ConvergenceResult:
         }
 
 
-def parse_issues(llm_output: str, iteration: int = 0) -> list[Issue]:
+def parse_issues(llm_output: str, iteration: int = 0, use_llm: bool = True) -> list[Issue]:
     """Parse structured issues from LLM output.
 
     Tries three stages in order:
       1. Regex: [SEVERITY] file:line -- description
       2. Structural: numbered lists with severity keywords
-      3. Returns best-effort if stages 1-2 produce nothing
+      3. LLM fallback via model_choice (extracts structured issues from free-form text)
     """
     if not llm_output or not llm_output.strip():
         return []
@@ -95,7 +95,13 @@ def parse_issues(llm_output: str, iteration: int = 0) -> list[Issue]:
     if issues:
         return issues
 
-    # Stage 3: best-effort extraction from any severity mentions
+    # Stage 3: LLM-based extraction via model_choice
+    if use_llm:
+        llm_issues = _parse_with_llm(llm_output, iteration)
+        if llm_issues:
+            return llm_issues
+
+    # Final fallback: regex-based best-effort
     return _parse_best_effort(llm_output, iteration)
 
 
@@ -225,8 +231,76 @@ def _parse_structural(text: str, iteration: int) -> list[Issue]:
     return issues
 
 
+def _parse_with_llm(text: str, iteration: int) -> list[Issue]:
+    """Stage 3: Use model_choice to extract structured issues from free-form text.
+
+    Sends the raw LLM output to a fast local model and asks it to extract
+    issues with severity, file, line, and description.
+    """
+    # Truncate input if huge (fast model, keep it tight)
+    snippet = text[:4000]
+    if len(text) > 4000:
+        snippet += "\n... [truncated]"
+
+    prompt = f"""Extract all bug/issue reports from the following text.
+For each issue, output a JSON array of objects with keys:
+  severity (CRITICAL/HIGH/MEDIUM/LOW), file (string), line (integer or null), description (string)
+
+TEXT:
+{snippet}
+
+JSON array:"""
+
+    try:
+        from model_choice import generate_json
+        result = generate_json(
+            prompt,
+            complexity="fast",
+            temperature=0.3,
+            max_tokens=2000,
+        )
+    except Exception:
+        return []
+
+    if not isinstance(result, list):
+        if isinstance(result, dict):
+            result = [result]
+        else:
+            return []
+
+    issues = []
+    seen = set()
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        sev = str(item.get("severity", "MEDIUM")).upper()
+        if sev not in SEVERITY_LEVELS:
+            sev = "MEDIUM"
+        desc = str(item.get("description", "")).strip()
+        if not desc or len(desc) < 5:
+            continue
+        file_path = str(item.get("file", "")).strip()
+        line_raw = item.get("line")
+        line_num = int(line_raw) if isinstance(line_raw, (int, float)) and line_raw else None
+
+        issue = Issue(
+            severity=sev,
+            file=_clean_file_path(file_path) if file_path else "",
+            line=line_num,
+            description=desc[:500],
+            confidence=0.5,
+            iteration=iteration,
+        )
+        fp = issue.fingerprint()
+        if fp not in seen:
+            seen.add(fp)
+            issues.append(issue)
+
+    return issues
+
+
 def _parse_best_effort(text: str, iteration: int) -> list[Issue]:
-    """Stage 3: Find any severity mentions and extract what we can."""
+    """Last resort: Find any severity mentions and extract what we can."""
     issues = []
     seen = set()
 
