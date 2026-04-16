@@ -1,5 +1,8 @@
 """Configuration for the recursive feedback loop."""
 
+import os
+import time
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -21,7 +24,7 @@ class LoopConfig:
 
     # --- Mode ---
     mode: str = "oneshot"  # "oneshot" (fresh Hermes per iteration) or "session" (persistent tmux)
-    tmux_session_name: str = "rfl_hermes"  # tmux session name for session mode
+    tmux_session_name: str = ""  # auto-derived if empty; set via --tmux-session
 
     # --- Hermes ---
     hermes_binary: str = "hermes"
@@ -66,6 +69,9 @@ class LoopConfig:
     compaction_model: Optional[str] = None  # if None, use main model
     compaction_provider: Optional[str] = None
 
+    # --- Concurrency (set programmatically, not via CLI) ---
+    run_id: str = ""  # unique run identifier (auto-set)
+
     def resolve_seed_prompt(self) -> str:
         """Get the seed prompt from config or file."""
         if self.seed_prompt:
@@ -81,10 +87,114 @@ class LoopConfig:
         return self.synthesis_instruction
 
     def get_output_dir(self) -> Path:
-        """Resolve output directory."""
+        """Resolve output directory. Auto-timestamps if not specified."""
         if self.output_dir:
             p = Path(self.output_dir)
         else:
-            p = Path.cwd() / "rfl_output"
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            p = Path.cwd() / f"rfl_output_{timestamp}"
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    def get_run_id(self) -> str:
+        """Get or generate a unique run ID."""
+        if self.run_id:
+            return self.run_id
+        return f"rfl_{os.getpid()}_{int(time.time())}"
+
+    def get_tmux_session_name(self) -> str:
+        """Get the tmux session name. Auto-derives a unique one if not set."""
+        if self.tmux_session_name:
+            return self.tmux_session_name
+        # Derive from output dir path hash for uniqueness
+        out = str(self.get_output_dir())
+        h = abs(hash(out)) % 10000
+        return f"rfl_{h}"
+
+    def get_lockfile_path(self) -> Path:
+        """Path to the PID lockfile for this run."""
+        return self.get_output_dir() / ".rfl.lock"
+
+    def get_lockfile_data(self) -> dict:
+        """Data to write into the lockfile."""
+        return {
+            "pid": os.getpid(),
+            "run_id": self.get_run_id(),
+            "workdir": str(Path(self.hermes_workdir).resolve()) if self.hermes_workdir else "",
+            "mode": self.mode,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "tmux_session": self.get_tmux_session_name() if self.mode == "session" else "",
+        }
+
+
+def find_running_rfl_instances() -> list:
+    """Scan for running RFL instances by finding .rfl.lock files.
+    
+    Returns list of dicts with pid, workdir, output_dir, etc.
+    Stale lockfiles (PID no longer alive) are cleaned up.
+    """
+    instances = []
+    # Scan cwd and common output locations
+    search_dirs = [Path.cwd()]
+    # Also check for any rfl_output_* dirs in cwd
+    for p in Path.cwd().glob("rfl_output*"):
+        if p.is_dir():
+            search_dirs.append(p)
+    
+    seen_dirs = set()
+    for search_dir in search_dirs:
+        real = search_dir.resolve()
+        if real in seen_dirs:
+            continue
+        seen_dirs.add(real)
+        
+        lockfile = search_dir / ".rfl.lock"
+        if not lockfile.exists():
+            continue
+        
+        try:
+            data = json.loads(lockfile.read_text())
+            pid = data.get("pid", 0)
+            
+            # Check if PID is still alive
+            if pid and _pid_alive(pid):
+                data["output_dir"] = str(search_dir)
+                data["lockfile"] = str(lockfile)
+                instances.append(data)
+            else:
+                # Stale lockfile -- clean it up
+                lockfile.unlink(missing_ok=True)
+        except (json.JSONDecodeError, OSError):
+            pass
+    
+    return instances
+
+
+def check_workdir_conflicts(workdir: str, my_pid: int = None) -> list:
+    """Check if any running RFL instance is using the same workdir.
+    
+    Returns list of conflicting instances.
+    """
+    if not workdir:
+        return []
+    
+    my_pid = my_pid or os.getpid()
+    target = str(Path(workdir).resolve())
+    conflicts = []
+    
+    for inst in find_running_rfl_instances():
+        if inst.get("pid") == my_pid:
+            continue
+        if inst.get("workdir") == target:
+            conflicts.append(inst)
+    
+    return conflicts
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check if a PID is still alive (portable)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
