@@ -22,6 +22,7 @@ from .templates import load_template, list_templates, apply_template
 from .seed_builder import build_audit_seed, detect_mode
 from .issue_parser import parse_issues, check_convergence, deduplicate_issues, filter_by_severity
 from .report import generate_report, write_report
+from .evolve import EvolveRunner, EvolveConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,6 +110,32 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Per-iteration timeout in seconds (default: 900)")
     sa.add_argument("--workdir", "-w", default="",
                      help="Working directory for Hermes (default: same as PATH)")
+
+    # --- evolve ---
+    ev = sub.add_parser("evolve", help="Evolve a prompt by feeding it back into itself")
+    ev.add_argument("prompt", nargs="?", help="Seed prompt to evolve")
+    ev.add_argument("--from-file", "-f", help="Read seed prompt from file")
+    ev.add_argument("--iterations", "-n", type=int, default=5,
+                     help="Max iterations (default: 5)")
+    ev.add_argument("--branch-every", type=int, default=0,
+                     help="Branch into alternatives every N iterations (0=never)")
+    ev.add_argument("--branch-on-stagnation", action="store_true", default=True,
+                     help="Auto-branch when output stops changing (default: True)")
+    ev.add_argument("--no-auto-branch", action="store_false", dest="branch_on_stagnation",
+                     help="Disable auto-branching on stagnation")
+    ev.add_argument("--temperature", type=float, default=0.7,
+                     help="LLM temperature (default: 0.7)")
+    ev.add_argument("--max-tokens", type=int, default=4000,
+                     help="Max response tokens per iteration (default: 4000)")
+    ev.add_argument("--complexity", "-c", default="balanced",
+                     choices=["fast", "balanced", "thorough", "auto"],
+                     help="Model complexity tier (default: balanced)")
+    ev.add_argument("--model", "-m", default=None,
+                     help="Override model (e.g. 'openai/glm-5.1')")
+    ev.add_argument("--output", "-o", default="",
+                     help="Output directory (default: auto-timestamp)")
+    ev.add_argument("--no-snapshots", action="store_false", dest="save_snapshots",
+                     help="Don't save per-iteration snapshots")
 
     return parser
 
@@ -565,6 +592,72 @@ def cmd_self_audit(args) -> int:
     return 0
 
 
+def cmd_evolve(args) -> int:
+    """Run an evolve loop -- one prompt that keeps feeding itself back."""
+    # Resolve seed prompt
+    if args.from_file:
+        seed = Path(args.from_file).read_text()
+    elif args.prompt:
+        seed = args.prompt
+    else:
+        print("Error: provide a prompt or --from-file", file=sys.stderr)
+        return 1
+
+    config = EvolveConfig(
+        seed_prompt=seed,
+        iterations=args.iterations,
+        branch_every=args.branch_every,
+        branch_on_stagnation=args.branch_on_stagnation,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        complexity=args.complexity,
+        model=args.model,
+        output_dir=args.output,
+        save_snapshots=args.save_snapshots,
+    )
+
+    print(f"Evolve starting")
+    print(f"  Seed: {len(seed)} chars")
+    print(f"  Iterations: {config.iterations}")
+    print(f"  Branch every: {config.branch_every or 'off'}")
+    print(f"  Auto-branch: {config.branch_on_stagnation}")
+    print(f"  Complexity: {config.complexity}")
+    print()
+
+    runner = EvolveRunner(config)
+
+    # Handle Ctrl+C
+    def handle_signal(sig, frame):
+        print("\nStopping evolve...", file=sys.stderr)
+        runner.stop()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    state = runner.run()
+
+    print(f"\n{'=' * 60}")
+    print(f"EVOLVE COMPLETE")
+    print(f"{'=' * 60}")
+    print(f"  Iterations: {len(state.turns)}")
+    print(f"  Time: {state.elapsed():.1f}s")
+    print(f"  Converged at: {state.converged_at or 'did not converge'}")
+    print(f"  Final output: {len(state.final_output)} chars")
+    branches = sum(1 for t in state.turns if t.branched)
+    if branches:
+        print(f"  Branched: {branches} iterations")
+    print(f"  Output: {state.output_dir}/")
+    print()
+
+    # Print the final output
+    print("--- FINAL OUTPUT ---")
+    print(state.final_output[:2000])
+    if len(state.final_output) > 2000:
+        print(f"\n... ({len(state.final_output) - 2000} more chars, see {state.output_dir}/final_output.txt)")
+
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -581,6 +674,8 @@ def main() -> int:
         return cmd_templates(args)
     elif args.command == "self-audit":
         return cmd_self_audit(args)
+    elif args.command == "evolve":
+        return cmd_evolve(args)
     else:
         parser.print_help()
         return 0
