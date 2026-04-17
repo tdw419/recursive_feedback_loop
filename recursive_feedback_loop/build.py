@@ -40,6 +40,9 @@ CONTINUE_TEMPLATE = """You are autonomously building a project. Here's your cont
 ORIGINAL GOAL:
 {seed}
 
+IMPORTANT: Work in the CURRENT DIRECTORY ({workdir}). Create all files here.
+Use relative paths like ./src/main.rs, ./Cargo.toml, etc.
+
 PROJECT STATE:
 {project_state}
 
@@ -132,11 +135,16 @@ class BuildRunner:
 
             # Build the prompt for this iteration
             if i == 0:
-                prompt = self.config.seed_prompt
+                prompt = (
+                    f"IMPORTANT: Work in the CURRENT DIRECTORY ({self.config.workdir}). "
+                    f"Create all files here. Use relative paths.\n\n"
+                    f"{self.config.seed_prompt}"
+                )
             else:
                 project_state = self._gather_project_state()
                 prompt = CONTINUE_TEMPLATE.format(
                     seed=self.config.seed_prompt[:2000],
+                    workdir=self.config.workdir,
                     project_state=project_state,
                     prev_iteration=i - 1,
                     prev_output=prev_output[:6000],
@@ -231,12 +239,26 @@ class BuildRunner:
         )
 
     def _clean_output(self, text: str) -> str:
-        """Clean Hermes output -- deduplicate, strip artifacts."""
+        """Clean Hermes output -- strip UI artifacts, deduplicate."""
         if not text:
             return ""
 
         # Remove ANSI escape codes
         text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+        # Strip Hermes UI artifacts (box drawing, tool progress)
+        lines = text.split("\n")
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            if any(p in stripped for p in ["preparing", "┊"]):
+                continue
+            if stripped.startswith("╭─") or stripped.startswith("╰─"):
+                continue
+            if stripped and all(c in "╭╮╰╯│─┃┆┊║═" for c in stripped):
+                continue
+            cleaned.append(line)
+        text = "\n".join(cleaned).strip()
 
         # Hermes dedup: if second half matches first half
         mid = len(text) // 2
@@ -248,7 +270,7 @@ class BuildRunner:
                 if first[:overlap].replace(" ", "") == second[:overlap].replace(" ", ""):
                     return first
 
-        return text.strip()
+        return text
 
     def _gather_project_state(self) -> str:
         """Gather current project state for context injection."""
