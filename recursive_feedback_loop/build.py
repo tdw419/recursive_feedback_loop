@@ -189,7 +189,7 @@ class BuildRunner:
         """Spawn Hermes subprocess with the prompt."""
         start = time.time()
 
-        cmd = [self.config.hermes_binary, "-q", "-Q"]
+        cmd = [self.config.hermes_binary, "-q", "-Q", "-t", ""]
         if self.config.hermes_model:
             cmd.extend(["-m", self.config.hermes_model])
         if self.config.hermes_provider:
