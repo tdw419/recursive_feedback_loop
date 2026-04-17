@@ -40,8 +40,9 @@ CONTINUE_TEMPLATE = """You are autonomously building a project. Here's your cont
 ORIGINAL GOAL:
 {seed}
 
-IMPORTANT: Work in the CURRENT DIRECTORY ({workdir}). Create all files here.
-Use relative paths like ./src/main.rs, ./Cargo.toml, etc.
+IMPORTANT: Create all files under {workdir}/ using ABSOLUTE paths.
+Use the terminal tool (mkdir, cat >, etc.) with full paths like {workdir}/src/main.rs.
+Do NOT use relative paths -- they may resolve to the wrong directory.
 
 PROJECT STATE:
 {project_state}
@@ -134,17 +135,22 @@ class BuildRunner:
                 break
 
             # Build the prompt for this iteration
+            # NOTE: Hermes file tools (patch, write_file) resolve paths relative
+            # to its auto-detected project root, NOT the subprocess cwd. So we
+            # must use absolute paths in all file instructions.
+            abs_workdir = str(Path(self.config.workdir).resolve())
             if i == 0:
                 prompt = (
-                    f"IMPORTANT: Work in the CURRENT DIRECTORY ({self.config.workdir}). "
-                    f"Create all files here. Use relative paths.\n\n"
+                    f"IMPORTANT: Create ALL files under {abs_workdir}/ using ABSOLUTE paths.\n"
+                    f"Use the terminal tool with commands like: mkdir -p {abs_workdir}/src && cat > {abs_workdir}/src/main.rs << 'EOF'\n"
+                    f"Do NOT use relative paths -- they may resolve to the wrong directory.\n\n"
                     f"{self.config.seed_prompt}"
                 )
             else:
                 project_state = self._gather_project_state()
                 prompt = CONTINUE_TEMPLATE.format(
                     seed=self.config.seed_prompt[:2000],
-                    workdir=self.config.workdir,
+                    workdir=abs_workdir,
                     project_state=project_state,
                     prev_iteration=i - 1,
                     prev_output=prev_output[:6000],
