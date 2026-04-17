@@ -118,7 +118,7 @@ class RollingSummary(CompactionStrategy):
             f"Capture the key ideas, conclusions, and unresolved questions. Be dense and informative.\n\n"
             f"{text}"
         )
-        cmd = ["hermes", "chat", "-q", prompt, "-Q"]
+        cmd = ["hermes", "chat", "-q", prompt, "-Q", "-t", ""]
         if self.compaction_model:
             cmd.extend(["-m", self.compaction_model])
         if self.compaction_provider:
@@ -239,7 +239,7 @@ class Hierarchical(CompactionStrategy):
                 f"Summarize in under {self.summary_max_chars} chars. "
                 f"Key ideas, conclusions, themes only. Dense and informative.\n\n{text}"
             )
-            cmd = ["hermes", "chat", "-q", prompt, "-Q"]
+            cmd = ["hermes", "chat", "-q", prompt, "-Q", "-t", ""]
             if self.compaction_model:
                 cmd.extend(["-m", self.compaction_model])
             if self.compaction_provider:

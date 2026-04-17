@@ -1,0 +1,8 @@
+name: security
+description: Security-focused review. Finds injection risks, auth bypasses, data leaks, and supply chain vulnerabilities.
+mode: oneshot
+iterations: 4
+budget: 12000
+strategy: hierarchical
+no_tools: false
+timeout: 900

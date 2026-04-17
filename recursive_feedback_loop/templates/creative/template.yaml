@@ -1,0 +1,8 @@
+name: creative
+description: Creative/philosophical exploration. Session mode with full history retention for emergent depth.
+mode: session
+iterations: 5
+budget: 8000
+strategy: hierarchical
+no_tools: true
+timeout: 300

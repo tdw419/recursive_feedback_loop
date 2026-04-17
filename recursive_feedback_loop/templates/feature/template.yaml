@@ -1,0 +1,8 @@
+name: feature
+description: Design and build a new feature. Iterations design, implement, catch bugs in own design, and fix them.
+mode: oneshot
+iterations: 5
+budget: 12000
+strategy: hierarchical
+no_tools: false
+timeout: 900

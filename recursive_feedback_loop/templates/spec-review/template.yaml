@@ -1,0 +1,8 @@
+name: spec-review
+description: Review a spec or design document. Finds ambiguities, inconsistencies, gaps, and missing edge cases.
+mode: oneshot
+iterations: 3
+budget: 10000
+strategy: hierarchical
+no_tools: true
+timeout: 600

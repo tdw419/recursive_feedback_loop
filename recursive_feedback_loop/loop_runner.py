@@ -391,16 +391,13 @@ class LoopRunner:
         When hermes_no_tools is set, tools are disabled for iteration > 0
         (seed iteration always has tools so it can do real work).
         """
-        cmd = [self.config.hermes_binary, "chat", "-q", prompt, "-Q"]
+        cmd = [self.config.hermes_binary, "chat", "-q", prompt, "-Q", "-t", ""]
         if self.config.hermes_model:
             cmd.extend(["-m", self.config.hermes_model])
         if self.config.hermes_provider:
             cmd.extend(["--provider", self.config.hermes_provider])
         if self.config.hermes_profile:
             cmd.extend(["-p", self.config.hermes_profile])
-        # Disable tools for recursive iterations (not seed) when --no-tools is set
-        if self.config.hermes_no_tools and iteration > 0:
-            cmd.extend(["-t", ""])
 
         try:
             result = subprocess.run(

@@ -1,0 +1,8 @@
+name: bug-hunt
+description: Track down a specific bug. Iterations form hypotheses, test them, eliminate wrong theories, find root cause.
+mode: oneshot
+iterations: 4
+budget: 10000
+strategy: hierarchical
+no_tools: false
+timeout: 900

@@ -1,0 +1,8 @@
+name: audit
+description: Deep architectural audit — finds bugs a single pass misses. Iteration 0 scans, 1+ corrects mistakes and goes deeper.
+mode: oneshot
+iterations: 5
+budget: 12000
+strategy: hierarchical
+no_tools: false
+timeout: 900
