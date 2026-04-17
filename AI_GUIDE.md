@@ -6,7 +6,17 @@ When you ask an AI to analyze a codebase, it does one pass and stops. It finds s
 
 RFL (Recursive Feedback Loop) fixes this by running the AI multiple times, feeding each output back as the next input. Each iteration sees what the previous one found, corrects its mistakes, and goes deeper. The last iteration consistently finds the worst bugs.
 
-## How It Works
+## Three Loop Topologies
+
+RFL has three commands, each a different loop shape for a different problem:
+
+| Command | Context flow | Compaction | Tools | Use for |
+|---------|-------------|------------|-------|---------|
+| `rfl run` | seed → compact → synthesize | Lossy (hierarchical) | Hermes | Analysis, audits, debugging |
+| `rfl evolve` | seed → refine → refine | Lossless (full output) | None (model_choice) | Prompt refinement, spec writing |
+| `rfl build` | seed → build → build | Lossless + project state | Hermes | Autonomous project creation |
+
+### `rfl run` — The Original Loop
 
 ```
 1. Seed prompt --> Hermes (AI agent) --> Response #0
@@ -156,6 +166,83 @@ Best for: audits, feature builds, bug hunts, anything with tool calls.
 Keeps one Hermes process alive in a tmux pane. Hermes retains full conversation history internally — no compaction needed. But tmux is fragile: long tool-call chains time out, UI changes break response extraction.
 
 Best for: creative exploration, philosophical prompts, short prompts without tools.
+
+### `rfl evolve` — Lossless Refinement
+
+```bash
+rfl evolve "Write a clear API specification for a pixel encoding system" -n 5 -c balanced
+```
+
+One prompt feeds itself back continuously. Each iteration takes the previous OUTPUT as input, adds a refinement instruction, and sends to an LLM via model_choice (no Hermes subprocess). No compaction — the full refined text becomes the next input.
+
+**Key features:**
+- Auto-branching on stagnation (when output stops changing, explores alternatives)
+- Configurable branch frequency (`--branch-every N`)
+- Convergence detection (stops early if output stabilizes)
+
+**Options:**
+
+| Flag | Short | Default | What it does |
+|------|-------|---------|-------------|
+| `--iterations` | `-n` | 5 | Max iterations |
+| `--branch-every` | | 0 | Branch every N iterations (0=never) |
+| `--branch-on-stagnation` | | True | Auto-branch when output stops changing |
+| `--temperature` | | 0.7 | LLM temperature |
+| `--max-tokens` | | 4000 | Max response tokens per iteration |
+| `--complexity` | `-c` | balanced | model_choice tier: fast, balanced, thorough, auto |
+| `--model` | `-m` | default | Override model (e.g. 'openai/glm-5.1') |
+| `--output` | `-o` | auto-timestamp | Output directory |
+
+**Output:** `conversation.md` (all iterations), `final_output.txt` (last iteration), `state.json` (machine-readable).
+
+### `rfl build` — Autonomous Project Builder
+
+```bash
+rfl build "Build a pixel-based byte encoder in Rust with 4 strategies" -w ./my_project -n 8
+```
+
+The AI designs, builds, tests, and iterates on a real project. Each iteration the AI sees what it produced last time, what files exist in the project, and continues building however it wants. No prescriptive instructions — the AI decides what to do next.
+
+**Flow:**
+1. Iteration 0: seed prompt → Hermes (with tools) → design + start building
+2. Iteration N: project state + last output → Hermes → continue building
+3. Between iterations: detect `[EXPLORE: question]` triggers, run ai_possibilities if found
+4. When done: AI writes `[DONE]` and the loop stops
+
+**Different from `run`:** No compaction. No prescriptive "go deeper" synthesis. The AI has full creative control.
+
+**Different from `evolve`:** Uses Hermes subprocess (has tools). Reads actual project state between iterations. Builds a real project, not just refined text.
+
+**Options:**
+
+| Flag | Short | Default | What it does |
+|------|-------|---------|-------------|
+| `--workdir` | `-w` | current dir | Project directory to build in |
+| `--iterations` | `-n` | 8 | Max iterations |
+| `--timeout` | `-t` | 900 | Seconds per iteration |
+| `--model` | `-m` | default | Hermes model override |
+| `--provider` | | default | Hermes provider override |
+| `--no-explore` | | off | Disable [EXPLORE] possibility branching |
+| `--explore-depth` | | 1 | Possibilities exploration depth |
+| `--output` | `-o` | auto-timestamp | Output directory for logs |
+| `--from-file` | `-f` | | Read seed prompt from file |
+
+**What the AI sees each iteration:**
+- The original seed prompt
+- Current project state (file listing with sizes, git log, git diff stats)
+- Its own previous output (last iteration's full response)
+- Any exploration results from [EXPLORE] triggers
+
+**Escape hatches:**
+- `[EXPLORE: question]` — AI is stuck, wants alternatives. The loop runs ai_possibilities and feeds branches back.
+- `[DONE]` — AI declares the project complete. Loop stops.
+
+**Output:** `conversation.md` (all iterations), `build_log.jsonl` (per-iteration stats), `snapshots/` (per-iteration state).
+
+**Known issues:**
+- Hermes file tools resolve relative to its auto-detected project root, not the subprocess cwd. The prompt instructs Hermes to use absolute paths and terminal commands, but complex projects may still have path issues.
+- Complex builds (Rust, C++) may need 600-900s per iteration. The first iteration is often the longest (scaffolding + compilation).
+- If an iteration times out, files it created survive. The next iteration picks up where it left off via project state injection.
 
 ## Key Flags Reference
 
@@ -332,12 +419,17 @@ print(f"Results: {state.output_dir / 'conversation.md'}")
   recursive_feedback_loop/
     cli.py              # CLI entry point
     config.py           # LoopConfig, concurrency, lockfile logic
-    loop_runner.py      # Core orchestration, PID lock lifecycle
+    loop_runner.py      # Core orchestration for `rfl run` (compaction loop)
     compaction.py       # Three compaction strategies
     session_mode.py     # Persistent tmux session (session mode)
     session_reader.py   # Hermes JSONL parser
     templates.py        # Template loader, placeholder filling
     templates/          # Built-in templates (audit, feature, etc.)
+    evolve.py           # `rfl evolve` — lossless refinement loop
+    build.py            # `rfl build` — autonomous project builder
+    seed_builder.py     # Self-audit seed prompt builder
+    issue_parser.py     # Parse structured issues from LLM output
+    report.py           # Self-audit report generation
   tests/                # 33 tests
   rfl_autoresearch/     # Automated tuning harness
   CASE_STUDY_SELF_AUDIT.md  # How the RFL found 8 bugs in itself
