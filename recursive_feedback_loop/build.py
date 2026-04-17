@@ -189,20 +189,21 @@ class BuildRunner:
         """Spawn Hermes subprocess with the prompt."""
         start = time.time()
 
-        cmd = [self.config.hermes_binary, "-q", "-Q", "-t", ""]
+        # Match the working pattern from loop_runner.py:
+        # hermes chat -q <prompt> -Q -t "" -m <model> --provider <provider>
+        cmd = [self.config.hermes_binary, "chat", "-q", prompt, "-Q", "-t", ""]
         if self.config.hermes_model:
             cmd.extend(["-m", self.config.hermes_model])
         if self.config.hermes_provider:
             cmd.extend(["--provider", self.config.hermes_provider])
 
-        # Write prompt to temp file to avoid ARG_MAX issues
+        # Save prompt for debugging
         prompt_file = Path(self.state.output_dir) / f"prompt_{iteration}.txt"
         prompt_file.write_text(prompt)
 
         try:
             result = subprocess.run(
                 cmd,
-                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=self.config.iteration_timeout,
