@@ -23,6 +23,7 @@ from .seed_builder import build_audit_seed, detect_mode
 from .issue_parser import parse_issues, check_convergence, deduplicate_issues, filter_by_severity
 from .report import generate_report, write_report
 from .evolve import EvolveRunner, EvolveConfig
+from .build import BuildRunner, BuildConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -136,6 +137,27 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Output directory (default: auto-timestamp)")
     ev.add_argument("--no-snapshots", action="store_false", dest="save_snapshots",
                      help="Don't save per-iteration snapshots")
+
+    # --- build ---
+    bd = sub.add_parser("build", help="AI autonomously builds a project from an idea")
+    bd.add_argument("prompt", nargs="?", help="Project idea / seed prompt")
+    bd.add_argument("--from-file", "-f", help="Read seed prompt from file")
+    bd.add_argument("--workdir", "-w", default=".",
+                     help="Project directory to build in (default: current dir)")
+    bd.add_argument("--iterations", "-n", type=int, default=8,
+                     help="Max iterations (default: 8)")
+    bd.add_argument("--timeout", "-t", type=int, default=900,
+                     help="Per-iteration timeout in seconds (default: 900)")
+    bd.add_argument("--model", "-m", default=None,
+                     help="Hermes model override")
+    bd.add_argument("--provider", default=None,
+                     help="Hermes provider override")
+    bd.add_argument("--no-explore", action="store_false", dest="explore_enabled",
+                     help="Disable [EXPLORE] possibility branching")
+    bd.add_argument("--explore-depth", type=int, default=1,
+                     help="Possibilities exploration depth (default: 1)")
+    bd.add_argument("--output", "-o", default="",
+                     help="Output directory for logs (default: auto-timestamp)")
 
     return parser
 
@@ -658,6 +680,67 @@ def cmd_evolve(args) -> int:
     return 0
 
 
+def cmd_build(args) -> int:
+    """Run an autonomous build loop -- AI builds a project from an idea."""
+    # Resolve seed prompt
+    if args.from_file:
+        seed = Path(args.from_file).read_text()
+    elif args.prompt:
+        seed = args.prompt
+    else:
+        print("Error: provide a project idea or --from-file", file=sys.stderr)
+        return 1
+
+    workdir = str(Path(args.workdir).resolve())
+    if not Path(workdir).is_dir():
+        print(f"Error: {workdir} is not a directory", file=sys.stderr)
+        return 1
+
+    config = BuildConfig(
+        seed_prompt=seed,
+        workdir=workdir,
+        iterations=args.iterations,
+        iteration_timeout=args.timeout,
+        hermes_model=args.model,
+        hermes_provider=args.provider,
+        explore_enabled=args.explore_enabled,
+        explore_depth=args.explore_depth,
+        output_dir=args.output,
+    )
+
+    print(f"Build starting")
+    print(f"  Seed: {seed[:100]}{'...' if len(seed) > 100 else ''}")
+    print(f"  Workdir: {workdir}")
+    print(f"  Iterations: {config.iterations}")
+    print(f"  Timeout: {config.iteration_timeout}s/iter")
+    print(f"  Explore: {'enabled' if config.explore_enabled else 'disabled'}")
+    print()
+
+    runner = BuildRunner(config)
+
+    def handle_signal(sig, frame):
+        print("\nStopping build...", file=sys.stderr)
+        runner.stop()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    state = runner.run()
+
+    explored = sum(1 for t in state.turns if t.explored)
+    print(f"\n{'=' * 60}")
+    print(f"BUILD {'COMPLETE' if state.turns else 'ABORTED'}")
+    print(f"{'=' * 60}")
+    print(f"  Iterations: {len(state.turns)}")
+    print(f"  Time: {state.elapsed():.1f}s")
+    if explored:
+        print(f"  Explored: {explored} iterations")
+    print(f"  Output: {state.output_dir}/")
+    print()
+
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -676,6 +759,8 @@ def main() -> int:
         return cmd_self_audit(args)
     elif args.command == "evolve":
         return cmd_evolve(args)
+    elif args.command == "build":
+        return cmd_build(args)
     else:
         parser.print_help()
         return 0
