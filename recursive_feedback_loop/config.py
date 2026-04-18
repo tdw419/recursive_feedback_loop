@@ -136,8 +136,11 @@ def find_running_rfl_instances() -> list:
     instances = []
     # Scan cwd and common output locations
     search_dirs = [Path.cwd()]
-    # Also check for any rfl_output_* dirs in cwd
+    # Also check for any rfl_output_* or rfl_roundtable_* dirs in cwd
     for p in Path.cwd().glob("rfl_output*"):
+        if p.is_dir():
+            search_dirs.append(p)
+    for p in Path.cwd().glob("rfl_roundtable_*"):
         if p.is_dir():
             search_dirs.append(p)
     

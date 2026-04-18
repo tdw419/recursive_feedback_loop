@@ -17,3 +17,6 @@ rfl = "recursive_feedback_loop.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["recursive_feedback_loop*"]

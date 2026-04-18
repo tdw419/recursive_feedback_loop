@@ -222,7 +222,8 @@ class Hierarchical(CompactionStrategy):
             for turn in medium:
                 # Extract key points as bullets
                 bullets = _turn_to_bullets(turn)
-                parts.append(f"  - ({turn.role}, iter {turn.iteration}): {bullets}")
+                agent_label = f", agent={turn.agent}" if turn.agent else ""
+                parts.append(f"  - ({turn.role}{agent_label}, round {turn.iteration}): {bullets}")
             parts.append("")
 
         # Tier 3: Recent turns verbatim
@@ -272,17 +273,26 @@ class Hierarchical(CompactionStrategy):
 # --- Helpers ---
 
 def _format_turns(turns: List[Turn], token_budget: int) -> str:
-    """Format turns as readable text, truncating to fit budget."""
+    """Format turns as readable text, truncating to fit budget.
+
+    Agent-aware: if a turn has an 'agent' field, includes the agent name
+    in the header. This preserves attribution through compaction.
+    """
     parts = []
     for t in turns:
-        parts.append(f"[{t.role} (iteration {t.iteration})]")
+        agent_tag = f" by {t.agent}" if t.agent else ""
+        parts.append(f"[{t.role}{agent_tag} (round {t.iteration})]")
         parts.append(t.content)
         parts.append("")
     return _truncate_to_tokens("\n".join(parts), token_budget)
 
 
 def _turn_to_bullets(turn: Turn) -> str:
-    """Extract key points from a turn as a condensed bullet string."""
+    """Extract key points from a turn as a condensed bullet string.
+
+    Agent-aware: prepends agent name if present.
+    """
+    agent_tag = f"[{turn.agent}] " if turn.agent else ""
     content = turn.content
     # Split into sentences using regex to avoid mangling != and file extensions
     import re
@@ -296,8 +306,8 @@ def _turn_to_bullets(turn: Turn) -> str:
         if len(sentences) >= 3:
             break
     if not sentences:
-        return content[:150] + ("..." if len(content) > 150 else "")
-    return "; ".join(sentences)
+        return agent_tag + content[:150] + ("..." if len(content) > 150 else "")
+    return agent_tag + "; ".join(sentences)
 
 
 def _truncate_to_tokens(text: str, token_budget: int) -> str:

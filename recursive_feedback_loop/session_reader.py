@@ -14,14 +14,18 @@ class Turn:
     content: str
     timestamp: Optional[str] = None
     iteration: int = 0  # which loop iteration this belongs to
+    agent: Optional[str] = None  # which agent produced this turn (roundtable mode)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "role": self.role,
             "content": self.content,
             "timestamp": self.timestamp,
             "iteration": self.iteration,
         }
+        if self.agent:
+            d["agent"] = self.agent
+        return d
 
     def token_estimate(self) -> int:
         """Rough token estimate (chars / 4)."""
@@ -37,8 +41,20 @@ class Conversation:
     """A sequence of turns."""
     turns: List[Turn] = field(default_factory=list)
 
-    def add(self, role: str, content: str, timestamp: str = None, iteration: int = 0):
-        self.turns.append(Turn(role=role, content=content, timestamp=timestamp, iteration=iteration))
+    def add(self, role: str, content: str, timestamp: str = None, iteration: int = 0, agent: str = None):
+        self.turns.append(Turn(role=role, content=content, timestamp=timestamp, iteration=iteration, agent=agent))
+
+    def turns_by_agent(self, agent_name: str) -> List[Turn]:
+        """Get all turns from a specific agent."""
+        return [t for t in self.turns if t.agent == agent_name]
+
+    def agent_names(self) -> List[str]:
+        """Get unique agent names that have contributed turns."""
+        seen = []
+        for t in self.turns:
+            if t.agent and t.agent not in seen:
+                seen.append(t.agent)
+        return seen
 
     def total_tokens_estimate(self) -> int:
         return sum(t.token_estimate() for t in self.turns)
@@ -99,7 +115,12 @@ class SessionReader:
                     content = data.get("content", "")
                     if role in ("user", "assistant") and content:
                         ts = data.get("timestamp")
-                        new_turns.append(Turn(role=role, content=content, timestamp=ts))
+                        iteration = data.get("iteration", 0)
+                        agent = data.get("agent")
+                        new_turns.append(Turn(
+                            role=role, content=content, timestamp=ts,
+                            iteration=iteration, agent=agent,
+                        ))
                 except json.JSONDecodeError:
                     continue
             self._last_line = last_i + 1

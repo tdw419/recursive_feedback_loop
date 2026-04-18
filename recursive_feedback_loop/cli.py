@@ -22,6 +22,8 @@ from .templates import load_template, list_templates, apply_template
 from .seed_builder import build_audit_seed, detect_mode
 from .issue_parser import parse_issues, check_convergence, deduplicate_issues, filter_by_severity
 from .report import generate_report, write_report
+from .agents import AgentConfig, parse_agent_string, load_agents_file, validate_agents
+from .roundtable import RoundTableRunner, RoundTableConfig
 from .evolve import EvolveRunner, EvolveConfig
 from .build import BuildRunner, BuildConfig
 
@@ -162,6 +164,41 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Possibilities exploration depth (default: 1)")
     bd.add_argument("--output", "-o", default="",
                      help="Output directory for logs (default: auto-timestamp)")
+
+    # --- roundtable ---
+    rt = sub.add_parser("roundtable", help="Multi-agent roundtable -- multiple AIs collaborate on a shared conversation")
+    rt.add_argument("prompt", nargs="?", help="Seed prompt (or use --from-file)")
+    rt.add_argument("--from-file", "-f", help="Read seed prompt from file")
+    rt.add_argument("--agent", "-a", action="append", default=[], metavar="SPEC",
+                     help="Agent definition: 'name=X,model=Y,role=Z' (repeat for multiple agents)")
+    rt.add_argument("--agents-file", "-A", help="YAML file with agent definitions")
+    rt.add_argument("--rounds", "-n", type=int, default=5,
+                     help="Max rounds (each round = all agents take a turn) (default: 5)")
+    rt.add_argument("--budget", "-b", type=int, default=10000,
+                     help="Max context tokens per round (default: 10000)")
+    rt.add_argument("--strategy", "-s", choices=["sliding_window", "rolling_summary", "hierarchical"],
+                     default="hierarchical", help="Compaction strategy (default: hierarchical)")
+    rt.add_argument("--timeout", "-t", type=int, default=600,
+                     help="Per-agent timeout in seconds (default: 600)")
+    rt.add_argument("--max-runtime", type=int, default=7200,
+                     help="Max total runtime in seconds (default: 7200)")
+    rt.add_argument("--workdir", "-w", help="Working directory for Hermes agents")
+    rt.add_argument("--no-tools", action="store_true", default=False,
+                     help="Disable Hermes tools for faster text-only iterations")
+    rt.add_argument("--output", "-o", default="",
+                     help="Output directory (default: ./rfl_roundtable_<timestamp>)")
+    rt.add_argument("--synthesis", help="Custom synthesis instruction for agents")
+    rt.add_argument("--synthesis-file", help="Read synthesis instruction from file")
+    rt.add_argument("--recent-turns", type=int, default=4,
+                     help="Recent turns to keep verbatim (default: 4)")
+    rt.add_argument("--medium-turns", type=int, default=6,
+                     help="Medium turns to keep as bullets (default: 6)")
+    rt.add_argument("--summary-chars", type=int, default=600,
+                     help="Max chars for summary block (default: 600)")
+    rt.add_argument("--compaction-model", help="Separate model for compaction summarization")
+    rt.add_argument("--compaction-provider", help="Separate provider for compaction summarization")
+    rt.add_argument("--export", choices=["jsonl", "markdown", "both"], default="both",
+                     help="Export format (default: both)")
 
     return parser
 
@@ -618,6 +655,111 @@ def cmd_self_audit(args) -> int:
     return 0
 
 
+def cmd_roundtable(args) -> int:
+    """Run a multi-agent roundtable."""
+    # --- Resolve agents ---
+    agents = []
+    if args.agents_file:
+        if args.agent:
+            print("WARNING: Both --agents-file and --agent specified. Using --agents-file, ignoring --agent.", file=sys.stderr)
+        try:
+            agents = load_agents_file(args.agents_file)
+        except Exception as e:
+            print(f"Error loading agents file: {e}", file=sys.stderr)
+            return 1
+    elif args.agent:
+        for spec in args.agent:
+            try:
+                agents.append(parse_agent_string(spec))
+            except ValueError as e:
+                print(f"Error parsing agent spec: {e}", file=sys.stderr)
+                return 1
+    else:
+        print("Error: Define agents with --agent or --agents-file", file=sys.stderr)
+        print("Example:", file=sys.stderr)
+        print('  rfl roundtable "Analyze this code" \\', file=sys.stderr)
+        print('    -a "name=auditor,model=claude-sonnet-4,role=Find bugs" \\', file=sys.stderr)
+        print('    -a "name=optimizer,model=gemini-2.5-pro,role=Find perf issues"', file=sys.stderr)
+        return 1
+
+    if len(agents) < 2:
+        print("Warning: roundtable works best with 2+ agents. Only 1 defined.", file=sys.stderr)
+
+    # --- Resolve seed prompt ---
+    seed_prompt = ""
+    if args.from_file:
+        seed_prompt = Path(args.from_file).read_text().strip()
+    elif args.prompt:
+        seed_prompt = args.prompt
+    else:
+        print("Error: provide a seed prompt or --from-file", file=sys.stderr)
+        return 1
+
+    # --- Validate ---
+    warnings = validate_agents(agents)
+    for w in warnings:
+        print(f"  WARNING: {w}", file=sys.stderr)
+
+    # --- Build config ---
+    config = RoundTableConfig(
+        agents=agents,
+        seed_prompt=seed_prompt,
+        max_rounds=args.rounds,
+        max_context_tokens=args.budget,
+        compaction_strategy=args.strategy,
+        iteration_timeout=args.timeout,
+        max_runtime_seconds=args.max_runtime,
+        hermes_workdir=args.workdir,
+        hermes_no_tools=args.no_tools,
+        output_dir=args.output,
+        synthesis_instruction=args.synthesis if args.synthesis else None,
+        synthesis_instruction_file=args.synthesis_file,
+        recent_turns_verbatim=args.recent_turns,
+        medium_turns_bullets=args.medium_turns,
+        summary_max_chars=args.summary_chars,
+        compaction_model=args.compaction_model,
+        compaction_provider=args.compaction_provider,
+        export_format=args.export,
+    )
+
+    runner = RoundTableRunner(config)
+
+    def handle_signal(sig, frame):
+        print("\nStopping roundtable...", file=sys.stderr)
+        runner.stop()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    print(f"Roundtable RFL starting")
+    print(f"  Agents: {len(agents)}")
+    for a in agents:
+        print(f"    {a.display()}")
+    print(f"  Rounds: {config.max_rounds}")
+    print(f"  Strategy: {config.compaction_strategy}")
+    print(f"  Token budget: {config.max_context_tokens}")
+    print(f"  Timeout: {config.iteration_timeout}s/agent")
+    output_dir = config.get_output_dir()
+    print(f"  Output: {output_dir}")
+    print()
+
+    state = runner.run()
+
+    print()
+    print(f"{'=' * 60}")
+    print(f"ROUNDTABLE COMPLETE")
+    print(f"{'=' * 60}")
+    print(f"  Rounds: {state.iteration + 1}")
+    print(f"  Total turns: {len(state.conversation)}")
+    print(f"  Total tokens: ~{state.conversation.total_tokens_estimate()}")
+    print(f"  Time: {state.elapsed():.1f}s")
+    print(f"  Agents: {', '.join(state.conversation.agent_names())}")
+    print(f"  Output: {state.output_dir}")
+    print()
+
+    return 0
+
+
 def cmd_evolve(args) -> int:
     """Run an evolve loop -- one prompt that keeps feeding itself back."""
     # Resolve seed prompt
@@ -771,6 +913,8 @@ def main() -> int:
         return cmd_evolve(args)
     elif args.command == "build":
         return cmd_build(args)
+    elif args.command == "roundtable":
+        return cmd_roundtable(args)
     else:
         parser.print_help()
         return 0
