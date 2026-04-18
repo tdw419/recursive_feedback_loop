@@ -103,7 +103,9 @@ class RoundTableConfig:
     def resolve_synthesis_instruction(self) -> str:
         if self.synthesis_instruction_file:
             return Path(self.synthesis_instruction_file).read_text().strip()
-        return self.synthesis_instruction
+        if self.synthesis_instruction:
+            return self.synthesis_instruction
+        return ROUNDTABLE_SYNTHESIS
 
     def get_output_dir(self) -> Path:
         if self.output_dir:
