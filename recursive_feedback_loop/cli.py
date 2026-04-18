@@ -152,6 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Hermes model override")
     bd.add_argument("--provider", default=None,
                      help="Hermes provider override")
+    bd.add_argument("--retry-provider", default=None,
+                     help="Fallback provider when primary times out (e.g. google)")
+    bd.add_argument("--retry-model", default=None,
+                     help="Fallback model when primary times out (e.g. gemini-2.5-flash)")
     bd.add_argument("--no-explore", action="store_false", dest="explore_enabled",
                      help="Disable [EXPLORE] possibility branching")
     bd.add_argument("--explore-depth", type=int, default=1,
@@ -703,6 +707,8 @@ def cmd_build(args) -> int:
         iteration_timeout=args.timeout,
         hermes_model=args.model,
         hermes_provider=args.provider,
+        retry_provider=args.retry_provider,
+        retry_model=args.retry_model,
         explore_enabled=args.explore_enabled,
         explore_depth=args.explore_depth,
         output_dir=args.output,
@@ -713,6 +719,10 @@ def cmd_build(args) -> int:
     print(f"  Workdir: {workdir}")
     print(f"  Iterations: {config.iterations}")
     print(f"  Timeout: {config.iteration_timeout}s/iter")
+    print(f"  Model: {config.hermes_model or 'default'}")
+    print(f"  Provider: {config.hermes_provider or 'default'}")
+    if config.retry_provider:
+        print(f"  Retry: {config.retry_model or 'default'} via {config.retry_provider}")
     print(f"  Explore: {'enabled' if config.explore_enabled else 'disabled'}")
     print()
 

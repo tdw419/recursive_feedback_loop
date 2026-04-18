@@ -74,6 +74,8 @@ class BuildConfig:
     hermes_binary: str = "hermes"
     hermes_model: Optional[str] = None
     hermes_provider: Optional[str] = None
+    retry_provider: Optional[str] = None  # fallback provider on timeout
+    retry_model: Optional[str] = None     # fallback model on timeout
     iteration_timeout: int = 900     # seconds per iteration
     explore_enabled: bool = True     # enable [EXPLORE] triggers
     explore_depth: int = 1           # possibilities exploration depth
@@ -200,7 +202,7 @@ class BuildRunner:
         return self.state
 
     def _run_hermes(self, iteration: int, prompt: str) -> BuildTurn:
-        """Spawn Hermes subprocess with the prompt."""
+        """Spawn Hermes subprocess with the prompt. Retries with fallback provider on timeout."""
         start = time.time()
 
         # Match the working pattern from loop_runner.py:
@@ -215,6 +217,31 @@ class BuildRunner:
         prompt_file = Path(self.state.output_dir) / f"prompt_{iteration}.txt"
         prompt_file.write_text(prompt)
 
+        output, exit_code = self._exec_hermes(cmd, start)
+
+        # If timed out AND we have a retry provider, try again with fallback
+        if exit_code == -1 and output == "" and self.config.retry_provider:
+            print(f"  Primary provider timed out, retrying with {self.config.retry_provider}...")
+            retry_cmd = [self.config.hermes_binary, "chat", "-q", prompt, "-Q", "-t", ""]
+            if self.config.retry_model:
+                retry_cmd.extend(["-m", self.config.retry_model])
+            retry_cmd.extend(["--provider", self.config.retry_provider])
+            output, exit_code = self._exec_hermes(retry_cmd, start)
+
+        # Clean Hermes output (deduplicate boxed + final)
+        output = self._clean_output(output)
+
+        elapsed = time.time() - start
+        return BuildTurn(
+            iteration=iteration,
+            prompt=prompt[:500],  # save first 500 chars of prompt
+            output=output,
+            elapsed_seconds=elapsed,
+            hermes_exit_code=exit_code,
+        )
+
+    def _exec_hermes(self, cmd: list, run_start: float) -> tuple:
+        """Execute a Hermes command. Returns (output, exit_code)."""
         try:
             result = subprocess.run(
                 cmd,
@@ -228,21 +255,60 @@ class BuildRunner:
         except subprocess.TimeoutExpired:
             output = ""
             exit_code = -1
+            # Try to recover output from Hermes session DB
+            recovered = self._recover_session_output(run_start)
+            if recovered:
+                print(f"  [RECOVERED {len(recovered)} chars from session DB]")
+                output = recovered
         except Exception as e:
             output = f"Error running Hermes: {e}"
             exit_code = -1
 
-        # Clean Hermes output (deduplicate boxed + final)
-        output = self._clean_output(output)
+        return output, exit_code
 
-        elapsed = time.time() - start
-        return BuildTurn(
-            iteration=iteration,
-            prompt=prompt[:500],  # save first 500 chars of prompt
-            output=output,
-            elapsed_seconds=elapsed,
-            hermes_exit_code=exit_code,
-        )
+    def _recover_session_output(self, started_before: float) -> str:
+        """Recover assistant output from Hermes session DB after a timeout.
+        
+        When Hermes times out, it often has done real work (tool calls, file writes)
+        but never finishes its text response. The session DB has all the messages.
+        We find the most recent session started after our subprocess launched and
+        extract the last assistant message as the output.
+        """
+        db_path = Path.home() / ".hermes" / "state.db"
+        if not db_path.exists():
+            return ""
+        
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            
+            # Find the most recent session that started after our subprocess
+            # (within a 5-second window to account for startup time)
+            rows = conn.execute(
+                "SELECT id FROM sessions WHERE started_at >= ? - 5 ORDER BY started_at DESC LIMIT 1",
+                (started_before,)
+            ).fetchall()
+            
+            if not rows:
+                conn.close()
+                return ""
+            
+            session_id = rows[0]["id"]
+            
+            # Get the last assistant message with content
+            rows = conn.execute(
+                "SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' AND content IS NOT NULL AND content != '' ORDER BY timestamp DESC LIMIT 1",
+                (session_id,)
+            ).fetchall()
+            conn.close()
+            
+            if not rows or not rows[0]["content"]:
+                return ""
+            
+            return rows[0]["content"]
+        except Exception:
+            return ""
 
     def _clean_output(self, text: str) -> str:
         """Clean Hermes output -- strip UI artifacts, deduplicate."""
